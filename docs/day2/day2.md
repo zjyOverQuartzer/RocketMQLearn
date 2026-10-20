@@ -25,7 +25,7 @@
 
 > **注意：这两种模式的区别，不在于启动了几个消费者，而在于多个消费者实例如何处理同一批消息。**
 
-### 1.2 集群消费模式
+### 1.2 集群消费模式（也可以叫负载均衡）
 
 集群消费是 RocketMQ 4.x 中的默认消费模式。
 
@@ -139,118 +139,435 @@ consumer.setMessageModel(MessageModel.BROADCASTING);
 
 这三个概念不要混为一谈。
 
+### 1.6 代码示例：
+
+一生产者二消费者，多消费者类似：
+
+#### 生产者：
+
+```Java
+package oneProducerToMutilConsumers;
+
+import org.apache.rocketmq.client.exception.MQBrokerException;
+import org.apache.rocketmq.client.exception.MQClientException;
+import org.apache.rocketmq.client.producer.DefaultMQProducer;
+import org.apache.rocketmq.client.producer.SendResult;
+import org.apache.rocketmq.common.message.Message;
+import org.apache.rocketmq.remoting.exception.RemotingException;
+
+import java.io.UnsupportedEncodingException;
+
+//单生产者
+public class oneProducer {
+    public static void main(String[] args) throws MQClientException, UnsupportedEncodingException, MQBrokerException, RemotingException, InterruptedException {
+        //1. 首先我们要创建一个生产者
+        DefaultMQProducer producer = new DefaultMQProducer("group1");
+        //2. 应该给这个生产者绑定NameSever的地址
+        producer.setNamesrvAddr("localhost:9876");
+        //3. 启动生产者
+        producer.start();
+        //然后我们要发送多条消息 为了方便演示多消费者之间是如何对消息处理
+        String content = "Hello RocketMQ";
+        for (int i = 0; i < 10; i++) {
+            content=content+i;
+            //给信息指定 topic  tag  内容
+            Message msg= new Message("topic2", "tag1", content.getBytes());
+            SendResult sendResult = producer.send(msg);
+            //打印返回结果
+            System.out.println("第"+i+"条返回结果" +sendResult);
+        }
+        //关闭连接
+        producer.shutdown();
+    }
+
+}
+
+```
+
+#### 多消费者：
+
+我们应该怎么创建多个消费者?
+
+> 写一个类，然后创建多个实例，但是默认idea不允许一个类创建多个实例
+> 所以我们要改一下设置：
+
+写好代码之后 点击一下这个类对应的配置
+
+![image-20261020195116159](day2.assets/image-20261020195116159.png)
+
+然后 点击 `Modify options`
+
+<img src="day2.assets/image-20261020195057290.png" alt="image-20261020195057290" style="zoom:50%;" />
+
+勾选这个 允许多个实例：
+
+<img src="day2.assets/image-20261020195210421.png" alt="image-20261020195210421" style="zoom:50%;" />
+
+然后点击确定
+
+```java
+package oneProducerToMutilConsumers;
+
+import org.apache.rocketmq.client.consumer.DefaultMQPushConsumer;
+import org.apache.rocketmq.client.consumer.listener.ConsumeConcurrentlyContext;
+import org.apache.rocketmq.client.consumer.listener.ConsumeConcurrentlyStatus;
+import org.apache.rocketmq.client.consumer.listener.MessageListenerConcurrently;
+import org.apache.rocketmq.client.exception.MQClientException;
+import org.apache.rocketmq.common.message.MessageExt;
+import org.apache.rocketmq.common.protocol.heartbeat.MessageModel;
+
+import java.util.List;
+
+public class MutilConsumers {
+    public static void main(String[] args) throws MQClientException {
+        //1.创建一个接收消息的对象Consumer
+        DefaultMQPushConsumer consumer = new DefaultMQPushConsumer("group1");
+        //2.设定接收的命名服务器地址
+        consumer.setNamesrvAddr("localhost:9876");
+        //3.设置接收消息对应的topic,对应的sub标签为任意
+        consumer.subscribe("topic2","*");
+        //设置当前消费者的消费模式（默认模式：集群消费（负载均衡））
+        consumer.setMessageModel(MessageModel.CLUSTERING);
+        //3.开启监听，用于接收消息
+        consumer.registerMessageListener(new MessageListenerConcurrently() {
+            @Override
+            public ConsumeConcurrentlyStatus consumeMessage(List<MessageExt> list, ConsumeConcurrentlyContext consumeConcurrentlyContext) {
+                //list 里面放的是MessageExt 也就是 生产者发送的消息
+                //我们拿到对应的消息就可以进行处理对应的业务了
+                for (MessageExt messageExt : list) {
+                    System.out.println(messageExt);
+                    byte[] body = messageExt.getBody();
+                    //打印消息里面真正的内容：
+                    System.out.println(new String(body));
+                }
+                //ConsumeConcurrentlyStatus 这个类是枚举类 之中只有两个属性
+                //CONSUME_SUCCESS 接收成功  RECONSUME_LATER 稍后重新消费
+                return ConsumeConcurrentlyStatus.CONSUME_SUCCESS;
+            }
+        });
+        //4. 启动消费者
+        consumer.start();
+        System.out.println("Consumer Started");
+
+        //注意 这里不要关闭消费者的长连接，否则MQ中的消息无法推送过来了
+    }
+}
+```
+
+#### 测试：
+
+启动两个 MutilConsumers 实例: 如图
+
+![image-20261020195616775](day2.assets/image-20261020195616775.png)
+
+然后我们再启动生产者，来发送消息
+
+![image-20261020195734466](day2.assets/image-20261020195734466.png)
+
+生产者打印出来的  发送结果
+
+```cmd
+第0条返回结果SendResult [sendStatus=SEND_OK, msgId=7F000001ACE418B4AAC2662054250000, offsetMsgId=C612000100002A9F000000000009523F, messageQueue=MessageQueue [topic=topic2, brokerName=LAPTOP-U6E8NF5P, queueId=1], queueOffset=3]
+第1条返回结果SendResult [sendStatus=SEND_OK, msgId=7F000001ACE418B4AAC2662054300001, offsetMsgId=C612000100002A9F0000000000095304, messageQueue=MessageQueue [topic=topic2, brokerName=LAPTOP-U6E8NF5P, queueId=2], queueOffset=3]
+第2条返回结果SendResult [sendStatus=SEND_OK, msgId=7F000001ACE418B4AAC2662054330002, offsetMsgId=C612000100002A9F00000000000953CA, messageQueue=MessageQueue [topic=topic2, brokerName=LAPTOP-U6E8NF5P, queueId=3], queueOffset=2]
+第3条返回结果SendResult [sendStatus=SEND_OK, msgId=7F000001ACE418B4AAC2662054370003, offsetMsgId=C612000100002A9F0000000000095491, messageQueue=MessageQueue [topic=topic2, brokerName=LAPTOP-U6E8NF5P, queueId=0], queueOffset=2]
+第4条返回结果SendResult [sendStatus=SEND_OK, msgId=7F000001ACE418B4AAC2662054390004, offsetMsgId=C612000100002A9F0000000000095559, messageQueue=MessageQueue [topic=topic2, brokerName=LAPTOP-U6E8NF5P, queueId=1], queueOffset=4]
+第5条返回结果SendResult [sendStatus=SEND_OK, msgId=7F000001ACE418B4AAC26620543B0005, offsetMsgId=C612000100002A9F0000000000095622, messageQueue=MessageQueue [topic=topic2, brokerName=LAPTOP-U6E8NF5P, queueId=2], queueOffset=4]
+第6条返回结果SendResult [sendStatus=SEND_OK, msgId=7F000001ACE418B4AAC26620543E0006, offsetMsgId=C612000100002A9F00000000000956EC, messageQueue=MessageQueue [topic=topic2, brokerName=LAPTOP-U6E8NF5P, queueId=3], queueOffset=3]
+第7条返回结果SendResult [sendStatus=SEND_OK, msgId=7F000001ACE418B4AAC2662054410007, offsetMsgId=C612000100002A9F00000000000957B7, messageQueue=MessageQueue [topic=topic2, brokerName=LAPTOP-U6E8NF5P, queueId=0], queueOffset=3]
+第8条返回结果SendResult [sendStatus=SEND_OK, msgId=7F000001ACE418B4AAC2662054440008, offsetMsgId=C612000100002A9F0000000000095883, messageQueue=MessageQueue [topic=topic2, brokerName=LAPTOP-U6E8NF5P, queueId=1], queueOffset=5]
+第9条返回结果SendResult [sendStatus=SEND_OK, msgId=7F000001ACE418B4AAC2662054460009, offsetMsgId=C612000100002A9F0000000000095950, messageQueue=MessageQueue [topic=topic2, brokerName=LAPTOP-U6E8NF5P, queueId=2], queueOffset=5]
+```
+
+消费者1：
+
+![image-20261020195848543](day2.assets/image-20261020195848543.png)
+
+```python
+Consumer Started
+
+MessageExt [brokerName=LAPTOP-U6E8NF5P, queueId=3, storeSize=199, queueOffset=2, sysFlag=0, bornTimestamp=1792497394739, bornHost=/198.18.0.1:59071, storeTimestamp=1792497394741, storeHost=/198.18.0.1:10911, msgId=C612000100002A9F00000000000953CA, commitLogOffset=611274, bodyCRC=2041576522, reconsumeTimes=0, preparedTransactionOffset=0, toString()=Message{topic='topic2', flag=0, properties={MIN_OFFSET=0, MAX_OFFSET=3, CONSUME_START_TIME=1792497394764, UNIQ_KEY=7F000001ACE418B4AAC2662054330002, CLUSTER=DefaultCluster, WAIT=true, TAGS=tag1}, body=[72, 101, 108, 108, 111, 32, 82, 111, 99, 107, 101, 116, 77, 81, 48, 49, 50], transactionId='null'}]
+
+MessageExt [brokerName=LAPTOP-U6E8NF5P, queueId=2, storeSize=198, queueOffset=3, sysFlag=0, bornTimestamp=1792497394736, bornHost=/198.18.0.1:59071, storeTimestamp=1792497394738, storeHost=/198.18.0.1:10911, msgId=C612000100002A9F0000000000095304, commitLogOffset=611076, bodyCRC=424236424, reconsumeTimes=0, preparedTransactionOffset=0, toString()=Message{topic='topic2', flag=0, properties={MIN_OFFSET=0, MAX_OFFSET=4, CONSUME_START_TIME=1792497394764, UNIQ_KEY=7F000001ACE418B4AAC2662054300001, CLUSTER=DefaultCluster, WAIT=true, TAGS=tag1}, body=[72, 101, 108, 108, 111, 32, 82, 111, 99, 107, 101, 116, 77, 81, 48, 49], transactionId='null'}]
+
+Hello RocketMQ012
+
+Hello RocketMQ01
+
+MessageExt [brokerName=LAPTOP-U6E8NF5P, queueId=2, storeSize=202, queueOffset=4, sysFlag=0, bornTimestamp=1792497394747, bornHost=/198.18.0.1:59071, storeTimestamp=1792497394749, storeHost=/198.18.0.1:10911, msgId=C612000100002A9F0000000000095622, commitLogOffset=611874, bodyCRC=932752680, reconsumeTimes=0, preparedTransactionOffset=0, toString()=Message{topic='topic2', flag=0, properties={MIN_OFFSET=0, MAX_OFFSET=5, CONSUME_START_TIME=1792497394766, UNIQ_KEY=7F000001ACE418B4AAC26620543B0005, CLUSTER=DefaultCluster, WAIT=true, TAGS=tag1}, body=[72, 101, 108, 108, 111, 32, 82, 111, 99, 107, 101, 116, 77, 81, 48, 49, 50, 51, 52, 53], transactionId='null'}]
+
+Hello RocketMQ012345
+
+MessageExt [brokerName=LAPTOP-U6E8NF5P, queueId=3, storeSize=203, queueOffset=3, sysFlag=0, bornTimestamp=1792497394750, bornHost=/198.18.0.1:59071, storeTimestamp=1792497394751, storeHost=/198.18.0.1:10911, msgId=C612000100002A9F00000000000956EC, commitLogOffset=612076, bodyCRC=683297347, reconsumeTimes=0, preparedTransactionOffset=0, toString()=Message{topic='topic2', flag=0, properties={MIN_OFFSET=0, MAX_OFFSET=4, CONSUME_START_TIME=1792497394767, UNIQ_KEY=7F000001ACE418B4AAC26620543E0006, CLUSTER=DefaultCluster, WAIT=true, TAGS=tag1}, body=[72, 101, 108, 108, 111, 32, 82, 111, 99, 107, 101, 116, 77, 81, 48, 49, 50, 51, 52, 53, 54], transactionId='null'}]
+
+Hello RocketMQ0123456
+
+MessageExt [brokerName=LAPTOP-U6E8NF5P, queueId=2, storeSize=206, queueOffset=5, sysFlag=0, bornTimestamp=1792497394758, bornHost=/198.18.0.1:59071, storeTimestamp=1792497394760, storeHost=/198.18.0.1:10911, msgId=C612000100002A9F0000000000095950, commitLogOffset=612688, bodyCRC=1157746776, reconsumeTimes=0, preparedTransactionOffset=0, toString()=Message{topic='topic2', flag=0, properties={MIN_OFFSET=0, MAX_OFFSET=6, CONSUME_START_TIME=1792497394770, UNIQ_KEY=7F000001ACE418B4AAC2662054460009, CLUSTER=DefaultCluster, WAIT=true, TAGS=tag1}, body=[72, 101, 108, 108, 111, 32, 82, 111, 99, 107, 101, 116, 77, 81, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57], transactionId='null'}]
+
+Hello RocketMQ0123456789
+```
+
+> 可以发现消费者1 只接受到了5条消息，另外5条 在消费者2 那里，这里就不再展示了
+
+那么我如果想让同一消费组内的每个消费者都获得订阅的Topic的全部消息，又该怎么办？
+
+只需要改一个参数： 
+
+```java
+//设置当前消费者的消费模式（默认模式：集群消费（负载均衡））
+//consumer.setMessageModel(MessageModel.CLUSTERING);
+//设置当前消费者的消费模式为广播模式
+ consumer.setMessageModel(MessageModel.BROADCASTING);
+```
+
+然后同一消费组内的每个消费者都会获得订阅的Topic的全部消息，这里就不演示了
+
+> 如果 Consumer A 和 Consumer B 属于不同的 Consumer Group，即使订阅同一个 Topic，通常也会各自维护消费进度，独立消费该 Topic 的消息。
+
+#### 生产者在放入MQ消息时，是按照顺序放的，为什么消费者取消息的时候，消息的顺序被打乱了？
+
+第一，Topic 通常包含多个 MessageQueue，普通消息可能被分配到不同队列，不同队列之间没有全局顺序保证。
+
+![image-20261020201901101](day2.assets/image-20261020201901101.png)
+
++ 每个队列内部，消息可以保持自己的存储顺序。
++ 但是，不同队列之间没有一个统一的消费顺序。
+
+因此，即使 Queue 0 中的消息按照 `0、2、4、6、8` 存储，Queue 1 中的消息按照 `1、3、5、7、9` 存储，也不能保证消费者最终按照 `0、1、2、3……9` 的顺序处理。
+
+第二，消费者默认可以采用并发消费模式，多个线程同时处理消息，由于处理耗时不同，最终完成顺序可能与发送顺序不同。
+
+![image-20261020201844855](day2.assets/image-20261020201844855.png)
+
+RocketMQ 4.x 中，如果消费者注册的是 `MessageListenerConcurrently`，就采用并发消费模式。多个消费线程可能同时处理消息，因此即使消息在 Broker 中按顺序存储，业务处理结果也不一定有序。
+
+另外，即使使用顺序消费监听器，如果你在监听器内部又把消息提交给自己的线程池异步执行，然后立刻返回，也仍然可能发生乱序。
+
+所以，如果业务需要保证消息顺序，就需要让相关消息进入同一个队列，并使用顺序消费模式，同时避免在业务处理过程中进行异步分发。
+
 ## 二、多生产者模式
 
 ### 2.1 什么是多生产者模式？
 
-上一篇我们使用一个 Producer 发送消息。
+在实际项目中，一条业务链路往往涉及多个微服务，不同服务都可能需要向 RocketMQ 发送消息。
 
-但是在实际项目中，消息可能来自不同的业务服务。
+例如，在一个电商系统中：
 
-例如：
++ **订单服务**：用户下单成功后，发送订单创建事件。
++ **支付服务**：用户支付成功后，发送支付成功事件。
++ **积分服务**：接收支付成功事件，为用户增加积分。
++ **通知服务**：接收订单事件，发送相关通知。
 
-+ 订单服务产生订单事件。
-+ 支付服务产生支付事件。
-+ 库存服务产生库存变更事件。
-
-这些服务可以分别创建自己的生产者实例，并向 RocketMQ 发送消息。
-
-简单理解：
+如果订单服务和支付服务都需要向 RocketMQ 发送消息，就可以分别创建自己的生产者，向同一个 Topic 发送消息。
 
 ```
-订单服务 Producer A --------+
-                            |
-支付服务 Producer B --------+----> RocketMQ Broker
-                            |
-库存服务 Producer C --------+
-                                      |
-                                  Consumer
+              电商系统
+                 |
+       +---------+---------+
+       |                   |
+   订单服务              支付服务
+       |                   |
+  Producer A           Producer B
+       |                   |
+       +---------+---------+
+                 |
+              RocketMQ
+                 |
+          Topic：mall_events
+                 |
+        +--------+--------+
+        |                 |
+     积分服务           通知服务
+     Consumer A        Consumer B
 ```
 
-多个生产者可以向同一个 Topic 发送消息。消费者根据订阅关系和消费模式接收、处理消息。
+这里需要理解：**多生产者模式指多个生产者实例或业务服务都可以向 RocketMQ 发送消息。它们可以向同一个 Topic 发送消息，不需要每个服务单独创建一个 Topic。**
 
-### 2.2 多生产者如何发送消息？
+### 2.2 场景一：订单服务发送订单创建消息
 
-下面使用 RocketMQ 4.x 的 Java Client 演示。
+假设用户在商城中成功下单，订单服务需要向 RocketMQ 发送一条订单创建事件。
 
-假设有两个生产者，它们分别发送消息到同一个 Topic。
+首先，订单服务创建自己的 Producer。
 
-生产者 A：
+```java
+import org.apache.rocketmq.client.producer.DefaultMQProducer;
+import org.apache.rocketmq.client.producer.SendResult;
+import org.apache.rocketmq.common.message.Message;
 
-```
-DefaultMQProducer producerA =
-        new DefaultMQProducer("producer_group_a");
+import java.nio.charset.StandardCharsets;
 
-producerA.setNamesrvAddr("127.0.0.1:9876");
-producerA.start();
+public class OrderServiceProducer {
 
-Message msgA = new Message(
-        "business_topic",
-        "来自生产者 A 的消息".getBytes(StandardCharsets.UTF_8)
-);
+    public static void main(String[] args) throws Exception {
 
-SendResult resultA = producerA.send(msgA);
+        // 创建订单服务的生产者
+        DefaultMQProducer producer =
+                new DefaultMQProducer("order_producer_group");
 
-System.out.println(resultA);
-```
+        producer.setNamesrvAddr("127.0.0.1:9876");
 
-生产者 B：
+        try {
+            producer.start();
 
-```
-DefaultMQProducer producerB =
-        new DefaultMQProducer("producer_group_b");
+            // 模拟用户创建订单
+            String orderId = "ORDER_1001";
 
-producerB.setNamesrvAddr("127.0.0.1:9876");
-producerB.start();
+            String body = "订单创建成功，orderId=" + orderId;
 
-Message msgB = new Message(
-        "business_topic",
-        "来自生产者 B 的消息".getBytes(StandardCharsets.UTF_8)
-);
+            // 向 mall_events 发送订单创建事件
+            Message message = new Message(
+                    "mall_events",
+                    "ORDER_CREATED",
+                    body.getBytes(StandardCharsets.UTF_8)
+            );
 
-SendResult resultB = producerB.send(msgB);
+            SendResult result = producer.send(message);
 
-System.out.println(resultB);
-```
+            System.out.println("订单服务发送成功：" + result);
 
-示例中的 `producer_group_a` 和 `producer_group_b` 是两个不同的生产者组名称。实际使用时，需要合理管理 Producer 实例的生命周期，并根据部署方式和业务场景配置生产者组。
-
-这里有几个重点：
-
-1. 两个生产者可以向同一个 Topic 发送消息。
-2. 两条消息会按照 RocketMQ 的路由和发送策略写入相应队列。
-3. 消费者不需要知道消息具体来自哪个生产者，只要订阅对应的 Topic，就可以按照订阅关系接收消息。
-4. 消息最终由哪个消费者实例处理，仍然取决于消费组和消费模式。
-
-### 2.3 Producer Group 是什么？
-
-前面创建生产者时，使用了：
-
-```
-new DefaultMQProducer("producer_group_a");
+        } finally {
+            producer.shutdown();
+        }
+    }
+}
 ```
 
-这里的 `producer_group_a` 就是 Producer Group 的名称。
+这里有三个关键点：
 
-Producer Group 表示生产者的逻辑分组，在 RocketMQ 4.x 的事务消息等场景中有重要作用。
+1. `order_producer_group`：订单服务使用的生产者组名称。
+2. `mall_events`：消息发送到的 Topic。
+3. `ORDER_CREATED`：消息的 Tag，用来表示订单创建事件。
 
-但需要注意：
+当订单创建成功后，订单服务就可以把这个业务事件发送给 RocketMQ，而不需要直接调用所有下游服务。
 
-**Producer Group 不等于 Topic，也不等于 MessageQueue。**
+### 2.3 场景二：支付服务发送支付成功消息
 
-Topic 用于分类消息，MessageQueue 用于组织和存储消息，而 Producer Group 用于标识生产者的逻辑分组。
+接下来，用户完成支付，支付服务需要发送支付成功事件。
 
-普通消息场景下，不要把 Producer Group 理解成决定消费者接收哪些消息的开关。
+支付服务也可以创建自己的 Producer。
 
-### 2.4 多生产者与多消费者如何配合？
+```java
+import org.apache.rocketmq.client.producer.DefaultMQProducer;
+import org.apache.rocketmq.client.producer.SendResult;
+import org.apache.rocketmq.common.message.Message;
 
-在实际业务中，多生产者与多消费者经常同时存在。
+import java.nio.charset.StandardCharsets;
 
-例如，订单服务和支付服务都可以产生业务事件，多个消费者实例再根据各自的消费组处理这些事件。
+public class PaymentServiceProducer {
 
-需要注意的是，多生产者发送消息，并不自动保证消息的全局顺序。
+    public static void main(String[] args) throws Exception {
 
-如果多个生产者并发发送消息，消息的到达顺序可能与业务事件发生顺序不同。对于有严格顺序要求的业务，需要额外设计消息路由、顺序发送以及顺序消费机制。
+        // 创建支付服务的生产者
+        DefaultMQProducer producer =
+                new DefaultMQProducer("payment_producer_group");
+
+        producer.setNamesrvAddr("127.0.0.1:9876");
+
+        try {
+            producer.start();
+
+            // 模拟用户支付成功
+            String orderId = "ORDER_1001";
+
+            String body = "订单支付成功，orderId=" + orderId;
+
+            // 同样发送到 mall_events
+            Message message = new Message(
+                    "mall_events",
+                    "PAYMENT_SUCCESS",
+                    body.getBytes(StandardCharsets.UTF_8)
+            );
+
+            SendResult result = producer.send(message);
+
+            System.out.println("支付服务发送成功：" + result);
+
+        } finally {
+            producer.shutdown();
+        }
+    }
+}
+```
+
+注意，支付服务虽然创建了自己的 Producer，但它发送消息时使用的 Topic 仍然是 `mall_events`。
+
+因此，订单服务和支付服务虽然是两个独立的业务服务，却可以共同向同一个 Topic 发送消息。
+
+此时，RocketMQ 中的消息可以理解为：
+
+| 消息来源 | Topic         | Tag               | 消息内容     |
+| -------- | ------------- | ----------------- | ------------ |
+| 订单服务 | `mall_events` | `ORDER_CREATED`   | 订单创建成功 |
+| 支付服务 | `mall_events` | `PAYMENT_SUCCESS` | 订单支付成功 |
+
+这里的 Tag 用于区分不同的业务事件，具体如何按 Tag 过滤，我们在后面的 Tag 过滤章节再详细介绍。
+
+### 2.4 这两条消息如何被消费者处理？
+
+假设现在有一个积分服务，需要在用户支付成功后为用户增加积分。
+
+它可以订阅 `mall_events`，接收相关业务消息，再根据消息类型执行对应的业务逻辑。
+
+整个过程如下：
+
+```text
+用户下单
+   |
+   v
+订单服务 Producer A
+   |
+   | 发送 ORDER_CREATED
+   v
+RocketMQ：mall_events
+   ^
+   | 发送 PAYMENT_SUCCESS
+   |
+支付服务 Producer B
+
+
+RocketMQ：mall_events
+   |
+   v
+消费者接收消息
+   |
+   +---- ORDER_CREATED
+   |          |
+   |          v
+   |      处理订单创建事件
+   |
+   +---- PAYMENT_SUCCESS
+              |
+              v
+          增加用户积分
+```
+
+这样，订单服务和支付服务只需要负责发送各自的业务事件。后续新增积分服务、通知服务等消费者时，通常不需要修改这两个生产者的发送逻辑。
+
+这就是使用消息队列进行业务解耦的一个实际例子。
+
+### 2.5 多生产者模式需要注意什么？
+
+**第一，多个生产者可以向同一个 Topic 发送消息。**
+
+Topic 是消息的逻辑分类，不是某个生产者专属的资源。不同服务可以根据业务设计，共同使用一个 Topic。
+
+**第二，Producer Group 不等于 Topic。**
+
+示例中的 `order_producer_group` 和 `payment_producer_group` 是两个生产者组名称，而 `mall_events` 才是 Topic。
+
+生产者组主要用于标识生产者的逻辑分组。它不是消费者的订阅条件，也不负责决定哪一个消费者接收消息。
+
+**第三，多生产者发送不代表消息具有全局顺序。**
+
+例如，订单服务发送了订单创建事件，支付服务随后发送了支付成功事件，但由于多个生产者可能并发发送，消息路由到不同队列，实际写入和消费顺序可能与业务事件发生顺序不同。
+
+如果业务要求同一个订单的相关消息必须严格按照顺序处理，就需要进一步设计消息路由和顺序消费机制，不能仅仅依赖多生产者发送的先后顺序。
+
+多生产者模式的核心就是：**多个业务服务各自使用 Producer，将业务事件发送到 RocketMQ；消费者再根据订阅关系处理这些消息。**
+
+在上面的例子中，订单服务发送订单创建事件，支付服务发送支付成功事件，两个服务共同使用 `mall_events` 这个 Topic。
+
+这种设计可以降低服务之间的直接依赖，让业务系统更容易扩展。
 
 ## 三、消息类型：同步、异步、单向消息
 
@@ -264,12 +581,12 @@ RocketMQ 4.x Java Client 常见的发送方式包括同步发送、异步发送�
 
 示例：
 
-```
+```java
 Message msg = new Message(
         "topic_message",
         "同步发送消息".getBytes(StandardCharsets.UTF_8)
 );
-
+//这就是我们之前使用的方法，我们之前用的都是同步发送
 SendResult result = producer.send(msg);
 
 System.out.println(result.getSendStatus());
@@ -283,9 +600,10 @@ System.out.println(result.getSendStatus());
 
 但需要注意：
 
-**同步发送成功，只能说明本次发送阶段获得了相应的成功结果，并不代表消费者已经完成业务处理。**
-
-生产者发送成功与消费者业务执行成功，是两个不同的阶段。
+> **同步发送成功，只能说明本次发送阶段获得了相应的成功结果，并不代表消费者已经完成业务处理。**
+>
+> 生产者发送成功与消费者业务执行成功，是两个不同的阶段。
+>
 
 ### 3.2 异步发送
 
@@ -293,7 +611,7 @@ System.out.println(result.getSendStatus());
 
 示例：
 
-```
+```java
 Message msg = new Message(
         "topic_message",
         "异步发送消息".getBytes(StandardCharsets.UTF_8)
@@ -301,12 +619,12 @@ Message msg = new Message(
 
 producer.send(msg, new SendCallback() {
 
-    @Override
+    @Override //如果成功就会执行这个方法
     public void onSuccess(SendResult result) {
         System.out.println("发送成功：" + result);
     }
 
-    @Override
+    @Override //失败 抛出异常就会执行这个方法
     public void onException(Throwable e) {
         System.err.println("发送失败：" + e.getMessage());
     }
@@ -322,7 +640,9 @@ producer.send(msg, new SendCallback() {
 
 例如，一个服务需要连续发送大量消息，如果每次都同步等待，就可能增加整体耗时；在适合的场景下，可以使用异步发送提升效率。
 
-不过要注意，示例中的生产者不能在回调执行前就被直接关闭，否则可能导致回调尚未完成。实际项目中应合理管理生产者的生命周期，并做好异常处理。
+> 不过要注意，示例中的生产者不能在回调执行前就被直接关闭，否则可能导致回调尚未完成。实际项目中应合理管理生产者的生命周期，并做好异常处理。
+>
+> 所以这种情况 就不要断开生产者与MQ的链接了
 
 ### 3.3 单向发送
 
@@ -330,7 +650,7 @@ producer.send(msg, new SendCallback() {
 
 示例：
 
-```
+```java
 Message msg = new Message(
         "topic_message",
         "单向发送消息".getBytes(StandardCharsets.UTF_8)
@@ -357,12 +677,13 @@ producer.sendOneway(msg);
 | 主要特点             | 结果明确，使用直观 | 可减少调用线程的等待         | 开销较小，但发送结果不可直接确认 |
 | 典型用途             | 重要业务消息       | 需要兼顾效率和结果通知的消息 | 非关键日志等                     |
 
-这里还需要区分两种容易混淆的“异步”。
-
-+ **业务异步**：订单服务发送消息后，不必等待积分服务处理完成。
-+ **异步发送 API**：生产者调用 `send(msg, callback)` 后，不必同步等待发送结果。
-
-二者不是同一个概念，可以同时使用，也可以只使用其中一种。
+> 这里还需要区分两种容易混淆的“异步”。
+>
+> + **业务异步**：订单服务发送消息后，不必等待积分服务处理完成。
+> + **异步发送 API**：生产者调用 `send(msg, callback)` 后，不必同步等待发送结果。
+>
+> 二者不是同一个概念，可以同时使用，也可以只使用其中一种。
+>
 
 ## 四、延时消息
 
@@ -380,7 +701,7 @@ producer.sendOneway(msg);
 
 基本流程：
 
-```
+```text
 用户创建订单
       |
       v
@@ -413,7 +734,7 @@ Broker 保存消息
 
 示例：
 
-```
+```java
 Message msg = new Message(
         "topic_delay",
         "10秒后再消费".getBytes(StandardCharsets.UTF_8)
@@ -427,7 +748,7 @@ producer.send(msg);
 
 在常见的 RocketMQ 4.x 默认延时等级配置中，Level 3 对应 10 秒。
 
-这里需要注意，`setDelayTimeLevel(3)` 设置的是延时等级，而不是直接填写延时秒数。
+> `setDelayTimeLevel(3)` 设置的是延时等级，而不是直接填写延时秒数。
 
 ### 4.3 RocketMQ 4.x 常见延时等级
 
@@ -443,7 +764,15 @@ producer.send(msg);
 | 8     | 4 分钟   | 17    | 1 小时   |
 | 9     | 5 分钟   | 18    | 2 小时   |
 
-以上是 RocketMQ 4.x 常见默认配置中的延时等级。具体时间以 Broker 的实际配置为准。
+> 以上是 RocketMQ 4.x 默认配置中的延时等级。具体时间以 Broker 的实际配置为准。
+>
+> 这个配置可以修改，并不是写死的
+>
+> 打开 Broker 的配置文件 `broker.conf`，找到或添加 `messageDelayLevel`：
+>
+> ```properties
+> messageDelayLevel=1s 5s 10s 15s 30s 1m 2m 3m 5m 10m
+> ```
 
 ### 4.4 延时消息适合哪些场景？
 
@@ -454,9 +783,8 @@ producer.send(msg);
 + 延迟触发业务检查。
 + 一定时间后执行补偿任务。
 
-不过，RocketMQ 4.x 的经典延时消息采用预定义等级，并不等于可以随意指定任意精确的延迟时间。
-
-RocketMQ 5.x 的定时和延时消息能力与 4.x 经典 API 存在差异，不能直接把上面的代码套用到所有版本。
+> 不过，RocketMQ 4.x 的经典延时消息采用预定义等级，并不等于可以随意指定任意精确的延迟时间。RocketMQ 5.x 的定时和延时消息能力与 4.x 经典 API 存在差异，不能直接把上面的代码套用到所有版本。
+>
 
 ## 五、批量消息
 
@@ -470,7 +798,7 @@ RocketMQ 5.x 的定时和延时消息能力与 4.x 经典 API 存在差异，不
 
 例如，我们需要发送三条消息：
 
-```
+```text
 消息 1
 消息 2
 消息 3
@@ -478,7 +806,7 @@ RocketMQ 5.x 的定时和延时消息能力与 4.x 经典 API 存在差异，不
 
 逐条发送：
 
-```
+```text
 Producer --> Broker：消息 1
 Producer --> Broker：消息 2
 Producer --> Broker：消息 3
@@ -486,7 +814,7 @@ Producer --> Broker：消息 3
 
 批量发送：
 
-```
+```text
 Producer --> Broker：消息 1 + 消息 2 + 消息 3
 ```
 
@@ -498,7 +826,7 @@ RocketMQ 4.x 可以将多条消息放入一个 `List<Message>`，再调用批量
 
 示例：
 
-```
+```java
 import org.apache.rocketmq.client.producer.SendResult;
 import org.apache.rocketmq.common.message.Message;
 
@@ -537,7 +865,7 @@ System.out.println(result);
 RocketMQ 4.x 的经典批量消息通常需要满足以下条件：
 
 1. **消息必须属于同一个 Topic。**
-2. **消息的** `**waitStoreMsgOK**` **设置需要一致。**
+2. **消息的** `waitStoreMsgOK` **设置需要一致。**
 3. **不能把延时消息直接混入普通批量消息。**
 4. **批次大小需要满足对应版本的限制。经典实现通常需要遵守约 4 MB 的批量大小限制，具体以版本实现为准。**
 
@@ -561,7 +889,7 @@ RocketMQ 4.x 的经典批量消息通常需要满足以下条件：
 
 ### 6.1 什么是 Tag？
 
-前面我们介绍过 Topic，它用于对消息进行逻辑分类。
+ Topic，它用于对消息进行逻辑分类。
 
 但是，一个 Topic 下可能还包含不同类型的消息。
 
@@ -573,7 +901,7 @@ RocketMQ 4.x 的经典批量消息通常需要满足以下条件：
 
 例如：
 
-```
+```text
 Topic：order_topic
     |
     +---- Tag：CREATED
@@ -588,7 +916,7 @@ Topic：order_topic
 + Topic 表示订单事件这个业务主题。
 + Tag 表示订单事件的具体类型。
 
-**Tag 是消息分类标签，不是一个独立的 MessageQueue，也不会因为增加 Tag 就自动增加队列。**
+> **Tag 是消息分类标签，不是一个独立的 MessageQueue，也不会因为增加 Tag 就自动增加队列。**
 
 ### 6.2 生产者如何指定 Tag？
 
@@ -596,10 +924,10 @@ Topic：order_topic
 
 示例：
 
-```
+```java
 Message msg = new Message(
         "order_topic",
-        "PAID",
+        "PAID", // 这里的 `"PAID"` 就是消息的 Tag。
         "订单支付成功".getBytes(StandardCharsets.UTF_8)
 );
 
@@ -618,10 +946,10 @@ producer.send(msg);
 
 假设消费者只关心订单支付成功和订单取消事件，可以在订阅时指定标签表达式。
 
-```
+```java
 consumer.subscribe(
         "order_topic",
-        "PAID || CANCELED"
+        "PAID || CANCELED" //这里就是筛选的条件表达式，之前都是用的*，之前接收所有Tag的消息
 );
 ```
 
@@ -631,7 +959,7 @@ consumer.subscribe(
 
 如果希望接收这个 Topic 下所有 Tag 的消息，可以使用：
 
-```
+```java
 consumer.subscribe("order_topic", "*");
 ```
 
@@ -639,7 +967,7 @@ consumer.subscribe("order_topic", "*");
 
 假设一个 Topic 中包含很多种业务事件：
 
-```
+```text
 order_topic
     |
     +---- CREATED
@@ -660,7 +988,8 @@ order_topic
 
 这样可以避免每个消费者都接收自己完全不需要的消息。
 
-需要注意，Tag 过滤通常基于消息标签进行匹配。如果业务需要按照多个动态属性组合筛选消息，仅使用 Tag 可能不够灵活，这时可以考虑 SQL 属性过滤。
+> 需要注意，Tag 过滤通常基于消息标签进行匹配。如果业务需要按照多个动态属性组合筛选消息，仅使用 Tag 可能不够灵活，这时可以考虑 SQL 属性过滤。
+>
 
 ## 七、SQL 过滤
 
@@ -683,7 +1012,7 @@ Tag 可以根据消息类别进行过滤，但业务有时需要按照多个属�
 
 先创建一条消息，并为它添加用户属性。
 
-```
+```java
 Message msg = new Message(
         "topic_sql",
         "用户相关消息".getBytes(StandardCharsets.UTF_8)
@@ -703,7 +1032,7 @@ producer.send(msg);
 | `vip` | `"1"`  | 是否为 VIP 用户 |
 | `age` | `"20"` | 用户年龄        |
 
-这些属性属于消息的扩展属性，并不是消息体本身。
+> **这些属性属于消息的扩展属性，并不是消息体本身。**
 
 ### 7.3 消费者如何使用 SQL 表达式过滤？
 
@@ -711,17 +1040,11 @@ producer.send(msg);
 
 示例：
 
-```
+```java
 consumer.subscribe(
         "topic_sql",
         MessageSelector.bySql("age >= 18 AND vip = '1'")
 );
-```
-
-表达式：
-
-```
-age >= 18 AND vip = '1'
 ```
 
 表示消息需要同时满足两个条件：
@@ -730,8 +1053,6 @@ age >= 18 AND vip = '1'
 2. `vip = '1'`：VIP 属性等于字符串 `'1'`。
 
 这里使用 `AND` 连接两个条件，因此只有同时满足条件的消息才符合该过滤表达式。
-
-实际使用时，应验证所用 RocketMQ 版本对属性值及比较表达式的支持，尤其要注意字符串属性与数字比较的语义。
 
 ### 7.4 SQL 过滤支持哪些表达式？
 
@@ -753,37 +1074,21 @@ RocketMQ 4.x 的 SQL92 过滤支持常见的比较、逻辑和空值判断表达
 | `OR`          | 逻辑或               |
 | `NOT`         | 逻辑非               |
 
-例如：
-
-```
-age >= 18 AND vip = '1'
-```
-
-表示年龄和 VIP 两个条件都要满足。
-
-而：
-
-```
-vip = '1' OR vip = '2'
-```
-
-表示只要满足其中一个条件即可。
-
 ### 7.5 SQL 过滤需要注意什么？
 
 首先，Broker 需要支持并开启相应的属性过滤功能。
 
 在 RocketMQ 4.x 的经典实现中，可以检查 Broker 配置文件中的：
 
-```
+```java
 enablePropertyFilter=true
 ```
 
 修改配置后，需要按照当前版本的部署方式重新加载或重启 Broker，并确认配置确实生效。
 
-其次，消费者订阅的 SQL 表达式必须符合支持的语法，消息也需要包含表达式中涉及的属性。
-
-最后，SQL 过滤并不是让 RocketMQ 变成一个通用数据库。它适合根据消息属性进行订阅过滤，但不适合代替数据库完成复杂查询、模糊检索或任意业务数据分析。
+> 消费者订阅的 SQL 表达式必须符合支持的语法，消息也需要包含表达式中涉及的属性。
+>
+> SQL 过滤并不是让 RocketMQ 变成一个通用数据库。它适合根据消息属性进行订阅过滤，但不适合代替数据库完成复杂查询、模糊检索或任意业务数据分析。
 
 ### 7.6 Tag 过滤与 SQL 过滤有什么区别？
 
@@ -793,7 +1098,7 @@ enablePropertyFilter=true
 | 使用方式   | 按标签匹配         | 按属性表达式匹配       |           |                           |
 | 适合场景   | 按业务事件类型筛选 | 按多个业务属性组合筛选 |           |                           |
 | 配置复杂度 | 较低               | 相对较高               |           |                           |
-| 示例       | `PAID              |                        | CANCELED` | `age >= 18 AND vip = '1'` |
+| 示例       | `PAID || CANCELED` | `age >= 18 AND vip = '1'` |||
 
 简单来说：
 
@@ -801,7 +1106,7 @@ enablePropertyFilter=true
 
 ## 八、本篇总结
 
-第二天主要学习了 RocketMQ 中几种常见的消息消费和发送方式，以及消息过滤能力。
+主要学习了 RocketMQ 中几种常见的消息消费和发送方式，以及消息过滤能力。
 
 这里把核心知识点简单总结一下。
 
@@ -822,6 +1127,32 @@ enablePropertyFilter=true
 + 批量发送为什么需要限制消息的 Topic 和批次大小？
 + Tag 过滤与 SQL 属性过滤分别适合什么场景？
 
-把这些问题弄清楚，再结合视频中的代码自己运行一遍，第二天的内容就基本掌握了。
+### 参考答案：
 
-下一篇将继续按照 B 站视频第三天的实际分集内容整理，不提前把后续课程的知识点混入本篇。
+#### **1. 为什么集群消费模式下，同一个 Consumer Group 的多个消费者不会各自收到全部消息？**
+
+因为集群消费模式采用负载均衡机制，同一个 Consumer Group 中的多个消费者会共同分担消息。RocketMQ 通过队列分配策略，将不同的 MessageQueue 分配给不同的消费者实例，从而实现并行消费，提高整体消费能力。
+
+#### **2. 同一个 Topic 被不同 Consumer Group 订阅时，为什么可以分别处理同一条业务事件？**
+
+因为不同的 Consumer Group 拥有独立的消费进度，可以分别消费同一个 Topic 中符合各自订阅条件的消息。例如，订单支付成功后，积分服务可以增加用户积分，通知服务可以发送支付通知，而订单服务只需要发送一次消息即可。
+
+> 这也就是，为什么消息不会在被消费之后立马就从MQ中删掉，因为可能还会有其他消费者需要这条消息。
+
+#### **3. 同步发送成功，是否意味着消费者已经处理成功？**
+
+不意味着。同步发送成功表示生产者获得了本次发送的成功结果，并不代表消费者已经完成业务处理。消息发送成功与消费者业务处理成功是两个不同的阶段。
+
+#### **4. RocketMQ 4.x 的延时消息为什么使用** `setDelayTimeLevel()`**，而不是直接传入任意秒数？**
+
+因为 RocketMQ 4.x 经典延时消息采用预定义的延时等级，具体延时时间由 Broker 的 `messageDelayLevel` 配置决定，生产者通过 `setDelayTimeLevel()` 指定等级即可。这种机制不支持通过该 API 任意指定延迟秒数。
+
+> 可以修改Broker`messageDelayLevel` 配置，自定义延时等级及对应时间，但是生产者只能通过`setDelayTimeLevel()` 指定等级。
+
+#### **5. 批量发送为什么需要限制消息的 Topic 和批次大小？**
+
+因为同一批次中的消息需要满足批量发送接口的要求，RocketMQ 4.x 经典批量发送通常要求消息属于同一个 Topic，并且批次大小需要符合版本限制。合理限制批次大小，可以避免请求过大带来的内存、网络和处理压力。
+
+#### **6. Tag 过滤与 SQL 属性过滤分别适合什么场景？**
+
+Tag 过滤适合按照消息类型进行筛选，例如只消费 `PAID` 标签的支付成功消息；SQL 属性过滤则适合根据多个消息属性组合筛选，例如使用 `age >= 18 AND vip = '1'` 过滤符合条件的消息。简单来说，按消息类型筛选优先考虑 Tag，按多个属性组合筛选可以考虑 SQL 过滤。
