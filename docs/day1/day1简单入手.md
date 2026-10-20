@@ -487,3 +487,66 @@ hello world1
 
 ```
 
+
+
+# 四、问题补充：
+
+## 1.启动时 报 `does not "opens java.nio" to unnamed module`
+
+如果你启动时 发现报以下错误，说明你使用的是17及以上的JDK版本，所以切换到17以下就好了
+
+```java
+Exception in thread "main" java.lang.NoClassDefFoundError: Could not initialize class io.netty.util.internal.PlatformDependent0
+	at io.netty.util.internal.PlatformDependent.getSystemClassLoader(PlatformDependent.java:694)
+	at io.netty.channel.nio.NioEventLoop$4.run(NioEventLoop.java:171)
+	at java.base/java.security.AccessController.doPrivileged(AccessController.java:319)
+	at io.netty.channel.nio.NioEventLoop.openSelector(NioEventLoop.java:167)
+	at io.netty.channel.nio.NioEventLoop.<init>(NioEventLoop.java:149)
+	at io.netty.channel.nio.NioEventLoopGroup.newChild(NioEventLoopGroup.java:102)
+	at io.netty.util.concurrent.MultithreadEventExecutorGroup.<init>(MultithreadEventExecutorGroup.java:64)
+	at io.netty.channel.MultithreadEventLoopGroup.<init>(MultithreadEventLoopGroup.java:49)
+	at io.netty.channel.nio.NioEventLoopGroup.<init>(NioEventLoopGroup.java:70)
+	at io.netty.channel.nio.NioEventLoopGroup.<init>(NioEventLoopGroup.java:65)
+	at io.netty.channel.nio.NioEventLoopGroup.<init>(NioEventLoopGroup.java:56)
+	at org.apache.rocketmq.remoting.netty.NettyRemotingClient.<init>(NettyRemotingClient.java:122)
+	at org.apache.rocketmq.client.impl.MQClientAPIImpl.<init>(MQClientAPIImpl.java:188)
+	at org.apache.rocketmq.client.impl.factory.MQClientInstance.<init>(MQClientInstance.java:133)
+	at org.apache.rocketmq.client.impl.MQClientManager.getOrCreateMQClientInstance(MQClientManager.java:53)
+	at org.apache.rocketmq.client.impl.producer.DefaultMQProducerImpl.start(DefaultMQProducerImpl.java:189)
+	at org.apache.rocketmq.client.impl.producer.DefaultMQProducerImpl.start(DefaultMQProducerImpl.java:175)
+	at org.apache.rocketmq.client.producer.DefaultMQProducer.start(DefaultMQProducer.java:272)
+	at learn.jyOverQ.simple.Producer.main(Producer.java:17)
+Caused by: java.lang.ExceptionInInitializerError: Exception java.lang.reflect.InaccessibleObjectException: Unable to make field long java.nio.Buffer.address accessible: module java.base does not "opens java.nio" to unnamed module @1ae369b7 [in thread "main"]
+	at java.base/java.lang.reflect.AccessibleObject.throwInaccessibleObjectException(AccessibleObject.java:391)
+	at java.base/java.lang.reflect.AccessibleObject.checkCanSetAccessible(AccessibleObject.java:367)
+    
+其中主要原因就是这句：
+Unable to make field long java.nio.Buffer.address accessible:
+module java.base does not "opens java.nio" to unnamed module
+```
+
+> 原因是当前项目使用 `rocketmq-client 4.8.0`，运行时带入 `netty-all 4.0.42.Final`。旧版 Netty 要反射访问 JDK 内部字段，而 JDK 17 及以后默认限制这种访问
+
+
+
+也可以不切换jdk版本，你在启动时加上  `--add-opens=java.base/java.nio=ALL-UNNAMED`
+
+当然不建议下面那种方式，还是直接切换JDK版本就好了。
+
+ **在 IDEA 中这样修改：**
+
+1. 打开 **Run → Edit Configurations（运行 → 编辑配置）**。
+
+2. 选中你正在启动的 `Producer` 配置。
+
+3. 如果看不到 **VM options**，点击 **Modify options → Add VM options**。
+
+4. 在 **VM options** 中填入：
+
+   ```
+   --add-opens=java.base/java.nio=ALL-UNNAMED
+   ```
+
+5. 点击 **Apply → OK**，重新运行。
+
+> 其他消费者或生产者配置如果出现同样报错，也添加这一项。
