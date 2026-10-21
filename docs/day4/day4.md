@@ -1,20 +1,434 @@
+从零开始学 RocketMQ（四）：集群部署、消息存储与高可用【保姆级教程】
 
 
 
+> **版本说明：** 本文中的集群配置参考课程中的传统 RocketMQ 4.x 架构。不同版本的启动参数、管理命令和高可用能力可能存在差异，实际使用时需要以所部署版本为准。
+
+## 一、集群
+
+### 一、集群介绍：
+
+#### 1.1 为什么需要集群？
+
+前面学习时，我们通常只启动一个 Broker，就可以完成消息的发送和消费。
+
+那么问题来了：如果 Broker 所在的机器突然宕机，会发生什么？
+
+假设业务系统正在使用 RocketMQ 处理订单：
+
+```text
+订单服务
+   |
+   v
+RocketMQ Broker
+   |
+   v
+订单消费者
+```
+
+如果 Broker 突然不可用，就可能影响生产者发送消息和消费者获取消息。
+
+单机部署还存在另外两个问题：
+
++ **容量有限：** 单个 Broker 的 CPU、内存、磁盘和网络资源存在上限。
++ **故障影响大：** 如果没有其他可用节点承担相应工作，单个 Broker 故障就可能影响消息服务。
+
+因此，实际部署中通常会使用集群。
+
+#### 1.2 RocketMQ 集群有什么作用？
+
+集群主要解决三个方面的问题。
+
+**第一，提升可用性。**
+
+通过部署多个 NameServer 和多个 Broker，减少单个节点故障对整体服务的影响。
+
+**第二，提升处理能力。**
+
+多个 Broker 可以承载不同的 Topic 队列，分担消息收发和存储压力。
+
+**第三，增强数据可靠性。**
+
+在支持主从复制的部署模式中，Master 可以将消息数据复制到 Slave，降低单个节点发生故障时的数据丢失风险。
+
+需要注意：集群并不意味着绝对不会宕机，也不意味着任何故障下都不会丢消息。具体可靠性取决于复制策略、刷盘策略、故障切换能力和业务侧的恢复机制。
+
+#### 1.3 RocketMQ 常见集群模式
+
+| 模式                | 特点                       | 主要问题                               |
+| ------------------- | -------------------------- | -------------------------------------- |
+| 单 Master           | 部署简单                   | Master 故障会影响服务                  |
+| 多 Master           | 多个 Master 分担队列与流量 | 单个 Master 的数据需要结合其他机制保障 |
+| 多 Master、多 Slave | 兼顾负载能力和主从数据复制 | 配置与运维更加复杂                     |
+
+接下来我们使用的是的 **2 Master + 2 Slave 集群**。
+
+### 二、RocketMQ 集群组件介绍
+
+在搭建集群之前，需要先理解其中的几个核心组件。
+
+#### 2.1 NameServer
+
+NameServer 主要负责维护 Broker 的路由信息。
+
+生产者需要发送消息时，会先获取 Topic 对应的路由信息，再根据路由选择合适的 Broker 和消息队列。
+
+可以简单理解为：
+
+> NameServer 告诉客户端，应该去哪里发送或获取消息；真正处理消息的是 Broker。
+
+NameServer 通常可以部署多个节点。它们相互独立地维护路由信息，不需要依赖一个中心化的 NameServer 主节点。
+
+#### 2.2 Broker
+
+Broker 是 RocketMQ 中真正负责处理消息的核心服务。
+
+它主要负责：
+
++ 接收生产者发送的消息。
++ 持久化存储消息。
++ 为消费者提供消息读取服务。
++ 维护消息消费相关的数据。
++ 在相应部署模式下执行主从复制和消费重试等机制。
+
+如果把 RocketMQ 比作一个物流系统，那么 Broker 就相当于真正接收、存放和分发货物的仓库。
+
+#### 2.3 Master 和 Slave
+
+在传统主从架构中：
+
++ **Master：** 主要负责消息写入，也可以为消费者提供消息读取服务。
++ **Slave：** 从 Master 复制数据，在相应配置下可以承担读取任务。
+
+Slave 的存在可以增强数据冗余，但 Master 宕机后 Slave不一定会自动提升为 Master。
+
+> 传统 RocketMQ 4.x 主从部署是否具备自动主从切换能力，需要看具体架构和配置。
+
+#### 2.4 Producer、Consumer 和 Topic
+
+除了 NameServer 和 Broker，之前学习的组件也会参与集群运行。
+
+| 组件           | 作用                                   |
+| -------------- | -------------------------------------- |
+| Producer       | 发送消息                               |
+| Consumer       | 接收和处理消息                         |
+| Topic          | 对消息进行逻辑分类                     |
+| MessageQueue   | Topic 下的消息队列，影响路由和并行消费 |
+| Consumer Group | 多个消费者实例共同消费消息的逻辑分组   |
+
+整体关系如下：
+
+```mermaid
+flowchart TD
+    P[Producer] --> NS1[NameServer 1]
+    P --> NS2[NameServer 2]
+    NS1 --> MA[Broker A Master]
+    NS2 --> MB[Broker B Master]
+    MA --> SA[Broker A Slave]
+    MB --> SB[Broker B Slave]
+    MA --> C[Consumer Group]
+    MB --> C
+```
+
+图中展示的是逻辑关系：NameServer 提供路由发现，Master 和 Slave 之间进行数据复制，消费者通过相应的 Broker 获取消息。
+
+### 三、2 主 2 从介绍
+
+#### 3.1 什么是 2M-2S？
+
+2M-2S 指的是两个 Master 和两个 Slave。
+
++ `2M`：两个 Master。
++ `2S`：两个 Slave。
+
+采用两台虚拟机进行演示，每台机器运行一个 NameServer 和两个 Broker 实例。
+
+为了避免同一主从组的 Master 和 Slave 同时受到单台机器故障影响，将它们分布到不同机器上。
+
+#### 3.2 集群结构
+
+假设两台机器的 IP 地址分别是：
+
+```
+虚拟机 A：192.168.200.129
+虚拟机 B：192.168.200.130
+```
+
+集群结构如下：
+
+```mermaid
+flowchart TB
+    subgraph A["虚拟机 A：192.168.200.129"]
+        NS1[NameServer 1]
+        MA[Broker A Master]
+        SB[Broker B Slave]
+    end
+
+    subgraph B["虚拟机 B：192.168.200.130"]
+        NS2[NameServer 2]
+        MB[Broker B Master]
+        SA[Broker A Slave]
+    end
+
+    MA -->|主从复制| SA
+    MB -->|主从复制| SB
+
+    NS1 -.路由注册.-> MA
+    NS2 -.路由注册.-> MB
+```
+
+这里有一个需要特别注意的地方：
+
+**Slave 与对应 Master 的** `brokerName` **必须一致。**
+
+例如：
+
+| 实例            | 所在机器 | `brokerName` | `brokerId` |
+| --------------- | -------- | ------------ | ---------- |
+| Broker A Master | 虚拟机 A | `broker-a`   | `0`        |
+| Broker A Slave  | 虚拟机 B | `broker-a`   | `1`        |
+| Broker B Master | 虚拟机 B | `broker-b`   | `0`        |
+| Broker B Slave  | 虚拟机 A | `broker-b`   | `1`        |
+
+传统配置中，`brokerId=0` 表示 Master，`brokerId` 大于 0 表示 Slave。
+
+#### 3.3 为什么每台机器都需要注意端口和目录？
+
+同一台机器上同时运行两个 Broker 进程。
+
+如果它们监听相同端口，或者使用相同的存储目录，就可能产生端口冲突和数据目录冲突。
+
+因此需要保证：
+
++ 同一机器上的 Broker 监听端口不同。
++ 每个 Broker 使用独立的存储目录。
++ 同一主从组使用一致的 `brokerName`。
++ Master 和 Slave 的角色配置正确。
++ NameServer 地址和对外公布的 Broker 地址可以被其他节点访问。
+
+这些是搭建多 Broker 集群时最基础、也最容易出错的配置。
+
+### 四、导入虚拟机
+
+> 这里网上很多教程，我就不赘述了，我用的是centOS7.9
 
 
 
+> 后续两台机器之间需要进行 NameServer 路由访问、Broker 通信和主从数据复制。
+>
+> 所以，不能只保证虚拟机能够访问互联网，还要保证虚拟机 A 和虚拟机 B 之间可以通信。
+>
+> 如果使用克隆的虚拟机，需要注意网卡 MAC 地址冲突、主机名重复和 IP 地址重复等问题。
+
+### 五、两台虚拟机配置
+
+#### 5.1 检查 IP 地址
+
+分别在两台虚拟机中执行：
+
+```cmd
+ip addr
+```
+
+示例：
+
+```cmd
+192.168.200.129
+192.168.200.130
+```
+
+如果你的本地网络环境使用了其他网段，可以使用实际地址替换，但所有配置文件中的相关地址也需要同步修改。
+
+#### 5.2 测试网络连通性
+
+在虚拟机 A 中执行：
+
+```cmd
+ping -c 4 192.168.200.130
+```
+
+在虚拟机 B 中执行：
+
+```cmd
+ping -c 4 192.168.200.129
+```
+
+如果无法互相访问，需要检查虚拟机网卡模式、IP 地址、路由以及防火墙规则。
+
+注意：`ping` 成功只能说明基本网络连通，不能证明 RocketMQ 所需的所有 TCP 端口均可访问。
+
+#### 5.3 配置 hosts
+
+在两台机器的 `/etc/hosts` 中配置对应的主机名。
+
+示例：
+
+```java
+192.168.200.129 rocketmq-nameserver1
+192.168.200.130 rocketmq-nameserver2
+
+192.168.200.129 rocketmq-master1
+192.168.200.129 rocketmq-slave2
+
+192.168.200.130 rocketmq-master2
+192.168.200.130 rocketmq-slave1
+```
+
+这样就可以通过主机名访问对应地址，而不必在每个配置中重复填写 IP。
+
+#### 5.4 配置 RocketMQ 环境变量
+
+假设 RocketMQ 安装在 `/rocketmq` 目录，可以配置：
+
+```Shell
+export ROCKETMQ_HOME=/rocketmq
+export PATH="$PATH:$ROCKETMQ_HOME/bin"
+```
+
+如果希望登录后自动生效，可以将配置写入适合当前系统的环境配置文件，然后重新加载。
+
+例如：
+
+```Shell
+source /etc/profile
+```
+
+实际安装目录不同，需要相应调整 `ROCKETMQ_HOME`。
+
+#### 5.5 检查防火墙和端口
+
+需要确保两台机器之间的 NameServer、Broker 及主从通信端口可访问。
+
+常见端口包括：
+
+| 端口示例 | 用途                                 |
+| -------- | ------------------------------------ |
+| `9876`   | NameServer                           |
+| `10911`  | Broker 监听端口示例                  |
+| `11011`  | 同机另一个 Broker 实例的监听端口示例 |
+
+> 具体端口以实际 Broker 配置为准，还要考虑客户端通信方式及版本对应的其他端口要求。
+>
+> 不建议为了省事就直接关闭所有防火墙；更合适的方式是确认网络策略并开放必要的端口。
+
+### 六、启动集群
+
+完成配置之后，就可以启动 NameServer 和 Broker。
+
+实际文件路径应以导入的 RocketMQ 安装包为准。
+
+#### 6.1 启动 NameServer
+
+在两台机器的 RocketMQ `bin` 目录中分别启动 NameServer：
+
+```shell
+nohup sh mqnamesrv &
+```
+
+启动后可以通过进程或日志检查服务是否正常。
+
+```Shell
+jps
+```
+
+如果 NameServer 启动失败，优先检查 Java 环境、端口占用、日志和启动脚本。
+
+#### 6.2 在虚拟机 A 启动 Broker
+
+虚拟机 A 上运行 Broker A Master 和 Broker B Slave：
+
+```Shell
+nohup sh mqbroker \
+  -c ../conf/2m-2s-sync/broker-a.properties &
+nohup sh mqbroker \
+  -c ../conf/2m-2s-sync/broker-b-s.properties &
+```
+
+#### 6.3 在虚拟机 B 启动 Broker
+
+虚拟机 B 上运行 Broker A Slave 和 Broker B Master：
+
+```Shell
+nohup sh mqbroker \
+  -c ../conf/2m-2s-sync/broker-a-s.properties &
+nohup sh mqbroker \
+  -c ../conf/2m-2s-sync/broker-b.properties &
+```
 
 
 
+#### 6.4 检查启动日志
 
+启动后可以查看对应的 Broker 日志，确认是否成功启动、是否连接 NameServer，以及是否出现端口冲突、配置解析失败等问题。
 
+常见排查方向：
 
++ NameServer 地址是否正确。
++ `brokerName`、`brokerId` 是否正确。
++ 监听端口是否冲突。
++ 存储目录是否存在且具有写入权限。
++ 两台机器是否可以通过配置的地址相互通信。
 
+**注意：** 启动四个 Broker 进程，不代表集群已经完全可用。还需要进一步检查集群注册、Topic 路由和实际消息收发。
 
+### 七、集群测试
 
+集群启动完成后，需要验证 NameServer 是否发现了所有 Broker，以及生产者和消费者能否正常工作。
 
-# 高级特性：
+#### 7.1 查看集群信息
+
+进入 RocketMQ 的 `bin` 目录，执行：
+
+```shell
+sh mqadmin clusterList \
+  -n 192.168.200.129:9876;192.168.200.130:9876
+```
+
+如果当前 Shell 将分号解释为命令分隔符，应给 NameServer 地址整体加引号：
+
+```Shell
+sh mqadmin clusterList \
+  -n "192.168.200.129:9876;192.168.200.130:9876"
+```
+
+检查输出中是否包含预期的 Broker 集群信息。
+
+重点关注：
+
++ 是否能发现 `broker-a` 和 `broker-b`。
++ Master、Slave 的角色是否符合预期。
++ Broker 地址是否为其他节点可以访问的地址。
++ 是否有 Broker 没有成功注册。
+
+具体输出字段会随 RocketMQ 版本和管理命令实现有所不同。
+
+#### 7.2 检查 Topic 路由
+
+如果测试 Topic 已经存在，可以使用：
+
+```Shell
+sh mqadmin topicRoute \
+  -n "192.168.200.129:9876;192.168.200.130:9876" \
+  -t TopicTest
+```
+
+检查 Topic 的路由信息，确认客户端能够发现对应的消息队列。
+
+如果 Topic 尚未创建，需要先按照当前版本的管理命令或生产者配置创建，再进行测试。
+
+#### 7.3 测试消息发送和消费
+
+可以沿用前面学习过的 Producer 和 Consumer 示例：
+
+1. 向测试 Topic 发送一条消息。
+2. 检查生产者是否收到正常的发送结果。
+3. 启动消费者并订阅相同 Topic。
+4. 检查消费者是否收到了消息。
+5. 观察消息是否进入预期的 Broker 队列。
+
+建议同时检查 Broker 日志和消费者日志，避免仅凭生产者返回成功就判断整个集群工作正常。
+
+# 二、高级特性：
 
 ## 1.消息存储：
 
